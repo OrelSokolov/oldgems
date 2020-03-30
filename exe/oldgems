@@ -1,0 +1,84 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+require 'net/http'
+require 'json'
+require 'date'
+require 'progress_bar'
+require 'colorize'
+require 'redis'
+
+class Array
+  include ProgressBar::WithProgress
+end
+
+$years = []
+
+def cached_request(uri)
+  redis = Redis.new(db: 15)
+  result = redis.get(uri)
+  if result.nil?
+    result = Net::HTTP.get(URI(uri))
+    redis.set(uri, result)
+  end
+  result
+end
+
+def fetch_date!(gem)
+  uri = "https://rubygems.org/api/v2/rubygems/#{gem[:name]}/versions/#{gem[:version]}.json"
+  response = cached_request(uri)
+  begin
+    gem[:date] = JSON.parse(response)["built_at"]
+    gem[:current_year] = Date.parse(gem[:date]).year
+    $years.push gem[:current_year] unless $years.include? gem[:current_year]
+  rescue
+    puts "Could not fetch date for #{gem[:name]}"
+  end
+end
+
+def fetch_versions!(gem)
+  uri = "https://rubygems.org/api/v1/versions/#{gem[:name]}.json"
+  response = cached_request(uri)
+  begin
+    gem[:fresh_year] = Date.parse(JSON.parse(response).first["built_at"]).year
+  rescue
+    puts "Could not fetch versions for #{gem[:name]}"
+  end
+end
+
+def update_status!(gem)
+  diff =  gem[:fresh_year].to_i - gem[:current_year].to_i
+  case diff
+  when 0
+    gem[:status] = :green
+  when 1
+    gem[:status] = :yellow
+  else
+    if diff > 1
+      gem[:status] = :red
+    else
+      gem[:status] = :green
+    end
+  end
+end
+
+gems = File.readlines('Gemfile.lock').map do |l|
+  match_data = l.match /[ ]{4}([a-zA-z-]+)[ ][(]((\d[.]?)+)[)]/
+  if match_data
+    {name: match_data[1], version: match_data[2]}
+  else
+    nil
+  end
+end.compact.each_with_progress do |gem|
+  fetch_date!(gem)
+  fetch_versions!(gem)
+  update_status!(gem)
+end
+
+$years.sort.each do |y|
+  puts '-'*80
+  puts y
+  puts '-'*80
+  gems.select{|g| g[:current_year] == y}.each{|g|
+    puts "#{g[:name].colorize(g[:status])} (#{g[:current_year]}/#{g[:fresh_year]})"
+  }
+end
